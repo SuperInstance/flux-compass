@@ -281,137 +281,74 @@ mod tests {
         assert_eq!(v2.y, 2.0);
     }
 
-    // --- Integration tests ---
-
     #[test]
-    fn integration_decision_tree_routes_goals() {
-        let tree = DecisionTree::new(DecisionNode::Branch {
-            condition: Condition::Eq("priority".into(), "high".into()),
-            then_branch: Box::new(DecisionNode::Branch {
-                condition: Condition::Gt("resources".into(), 50.0),
-                then_branch: Box::new(DecisionNode::Action(Action::new("execute_immediately"))),
-                else_branch: Box::new(DecisionNode::Action(Action::new("schedule_high"))),
-            }),
-            else_branch: Box::new(DecisionNode::Action(Action::new("queue_low"))),
-        });
-
-        let mut ctx = HashMap::new();
-        ctx.insert("priority".to_string(), "high".to_string());
-        ctx.insert("resources".to_string(), "80.0".to_string());
-        let actions = tree.decide(&ctx);
-        assert_eq!(actions[0].name, "execute_immediately");
+    fn test_normalize_negative_large() {
+        assert!((normalize(-720.0) - 0.0).abs() < 1e-9);
+        assert!((normalize(-450.0) - 270.0).abs() < 1e-9);
     }
 
     #[test]
-    fn integration_decompose_and_schedule() {
-        let parent = Goal::new("deploy", "Deploy App").with_priority(10);
-        let subs = GoalDecomposer::decompose_phases(&parent, &["Build", "Test", "Ship"]);
-
-        let mut sched = PriorityScheduler::new();
-        for sub in subs {
-            sched.add_goal(sub);
-        }
-        assert_eq!(sched.len(), 3);
-        let next = sched.next().unwrap();
-        assert!(next.id.starts_with("deploy_phase_"));
+    fn test_diff_exact_180() {
+        let d = diff(0.0, 180.0);
+        assert!((d.abs() - 180.0).abs() < 1e-9);
     }
 
     #[test]
-    fn integration_resource_aware_planning() {
-        let planner = ResourceAwarePlanner::new(Resources::new(100.0, 100.0, 10.0));
-        let goals = vec![
-            Goal::new("heavy", "Heavy").with_resources(60.0, 60.0),
-            Goal::new("light", "Light").with_resources(20.0, 20.0),
-            Goal::new("medium", "Medium").with_resources(30.0, 30.0),
-        ];
-        let plan = planner.plan(&goals);
-        assert_eq!(plan.len(), 2); // heavy + light OR heavy + medium
-        assert_eq!(plan[0].id, "heavy"); // first in list
+    fn test_offset_east() {
+        let c = Compass::new(90.0); // East
+        let v = c.offset(10.0);
+        assert!(((v.x - 10.0).abs() < 1e-9) && (v.y.abs() < 1e-9));
     }
 
     #[test]
-    fn integration_adaptation_cycle() {
-        let mut engine = AdaptationEngine::new();
-        let goal = Goal::new("task1", "Recurring Task").with_priority(10);
-
-        // Simulate 3 failures
-        for _ in 0..3 {
-            engine.record(Outcome {
-                goal_id: "task1".to_string(),
-                success: false,
-                duration_ms: 500,
-                resources_used: Resources::zero(),
-                notes: "timeout".to_string(),
-            });
-        }
-
-        let adj = engine.suggest_priority_adjustment(&goal);
-        assert!(adj.is_some());
-        assert_eq!(adj.unwrap().field, "priority");
-        assert_eq!(engine.success_rate("task1"), 0.0);
+    fn test_offset_south() {
+        let c = Compass::new(180.0); // South
+        let v = c.offset(10.0);
+        assert!((v.x.abs() < 1e-9) && ((v.y - 10.0).abs() < 1e-9));
     }
 
     #[test]
-    fn integration_progress_tracking_with_decomposition() {
-        let mut tracker = ProgressTracker::new();
-        let parent = Goal::new("project", "Project").with_priority(5);
-        let subs = GoalDecomposer::decompose_equally(&parent, 4);
-
-        for sub in subs {
-            tracker.track(sub);
-        }
-        tracker.update_progress("project_sub_0", 0.5);
-        tracker.update_progress("project_sub_0", 1.0);
-        tracker.update_progress("project_sub_1", 0.25);
-        tracker.update_progress("project_sub_1", 0.5);
-        tracker.update_progress("project_sub_2", 0.0);
-        tracker.update_progress("project_sub_3", 0.25);
-
-        let on_track = tracker.on_track();
-        assert!(on_track.contains(&"project_sub_0".to_string()));
-        assert!(on_track.contains(&"project_sub_1".to_string()));
+    fn test_distance_symmetric() {
+        let a = Vec2 { x: 3.0, y: 7.0 };
+        let b = Vec2 { x: -2.0, y: 4.0 };
+        assert!((distance(a, b) - distance(b, a)).abs() < 1e-9);
     }
 
     #[test]
-    fn integration_full_pipeline() {
-        // 1. Create and decompose a goal
-        let goal = Goal::new("pipeline", "Data Pipeline").with_priority(8).with_resources(50.0, 30.0);
-        let phases = GoalDecomposer::decompose_phases(&goal, &["Extract", "Transform", "Load"]);
+    fn test_facing_wrapped() {
+        let c = Compass::new(355.0);
+        assert!(c.facing(5.0, 15.0)); // 355→5 is only 10 deg
+        assert!(c.facing(350.0, 10.0)); // 355→350 is 5 deg, within 10 tol
+        assert!(!c.facing(350.0, 4.0)); // 5 deg, NOT within 4 tol
+        assert!(c.facing(0.0, 6.0)); // 355→0 is 5 deg, within 6 tol
+    }
 
-        // 2. Schedule with priority
-        let mut sched = PriorityScheduler::new();
-        sched.add_goal(Goal::new("other", "Other Task").with_priority(3));
-        for phase in phases {
-            sched.add_goal(phase);
-        }
+    #[test]
+    fn test_direction_boundary() {
+        // 22.5 should round to NE (index 0 after +22.5 offset = 45 → 45/45 = 1 → NE)
+        assert_eq!(Compass::new(22.5).direction(), Direction::NE);
+        // 67.5 → +22.5=90 → 90/45=2 → E
+        assert_eq!(Compass::new(67.5).direction(), Direction::E);
+    }
 
-        // 3. Check feasibility
-        let planner = ResourceAwarePlanner::new(Resources::new(80.0, 60.0, 10.0));
-        let scheduled = sched.scheduled();
-        let scheduled_owned: Vec<Goal> = scheduled.iter().map(|g| (*g).clone()).collect();
-        let feasible = planner.plan(&scheduled_owned);
-        assert!(feasible.len() >= 2); // At least some goals should fit
+    #[test]
+    fn test_tick_zero_dt() {
+        let mut c = Compass::new(0.0);
+        c.set_target(90.0);
+        // zero dt should not move heading
+        let h_before = c.heading;
+        c.tick(0.0);
+        // with zero dt, angular_velocity stays 0, heading unchanged
+        assert!((c.heading - h_before).abs() < 1e-9);
+    }
 
-        // 4. Track progress
-        let mut tracker = ProgressTracker::new();
-        for g in scheduled {
-            tracker.track(g.clone());
-        }
-
-        tracker.update_progress("pipeline_phase_0", 1.0);
-        tracker.update_progress("pipeline_phase_1", 0.5);
-
-        // 5. Record outcomes
-        let mut engine = AdaptationEngine::new();
-        engine.record(Outcome {
-            goal_id: "pipeline_phase_0".to_string(),
-            success: true,
-            duration_ms: 200,
-            resources_used: Resources::new(10.0, 5.0, 0.0),
-            notes: String::new(),
-        });
-
-        assert!(engine.success_rate("pipeline_phase_0") > 0.0);
-        assert!(tracker.overall_progress() > 0.0);
+    #[test]
+    fn test_angle_between_symmetric_negation() {
+        let a = Vec2 { x: 0.0, y: 0.0 };
+        let b = Vec2 { x: 1.0, y: 0.0 };
+        let ab = angle_between(a, b);
+        let ba = angle_between(b, a);
+        // angle back should be opposite (+180)
+        assert!(((ab - ba).abs() - 180.0).abs() < 1e-9 || (ab - ba).abs() < 1e-9);
     }
 }
