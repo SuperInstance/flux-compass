@@ -117,10 +117,21 @@ pub fn angle_between(from: Vec2, to: Vec2) -> f64 {
     normalize(dx.atan2(-dy).to_degrees())
 }
 
+pub mod decision;
+pub mod goal;
+pub mod adaptation;
+pub mod progress;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decision::{Condition, DecisionNode, DecisionTree, Action};
+    use crate::goal::{Goal, GoalDecomposer, PriorityScheduler};
+    use crate::adaptation::{Resources, AdaptationEngine, Outcome, ResourceAwarePlanner};
+    use crate::progress::ProgressTracker;
+    use std::collections::HashMap;
 
+    // --- Original Compass tests ---
     #[test]
     fn test_normalize() {
         assert!((normalize(0.0) - 0.0).abs() < 1e-9);
@@ -268,5 +279,139 @@ mod tests {
         let v2 = v;
         assert_eq!(v2.x, 1.0);
         assert_eq!(v2.y, 2.0);
+    }
+
+    // --- Integration tests ---
+
+    #[test]
+    fn integration_decision_tree_routes_goals() {
+        let tree = DecisionTree::new(DecisionNode::Branch {
+            condition: Condition::Eq("priority".into(), "high".into()),
+            then_branch: Box::new(DecisionNode::Branch {
+                condition: Condition::Gt("resources".into(), 50.0),
+                then_branch: Box::new(DecisionNode::Action(Action::new("execute_immediately"))),
+                else_branch: Box::new(DecisionNode::Action(Action::new("schedule_high"))),
+            }),
+            else_branch: Box::new(DecisionNode::Action(Action::new("queue_low"))),
+        });
+
+        let mut ctx = HashMap::new();
+        ctx.insert("priority".to_string(), "high".to_string());
+        ctx.insert("resources".to_string(), "80.0".to_string());
+        let actions = tree.decide(&ctx);
+        assert_eq!(actions[0].name, "execute_immediately");
+    }
+
+    #[test]
+    fn integration_decompose_and_schedule() {
+        let parent = Goal::new("deploy", "Deploy App").with_priority(10);
+        let subs = GoalDecomposer::decompose_phases(&parent, &["Build", "Test", "Ship"]);
+
+        let mut sched = PriorityScheduler::new();
+        for sub in subs {
+            sched.add_goal(sub);
+        }
+        assert_eq!(sched.len(), 3);
+        let next = sched.next().unwrap();
+        assert!(next.id.starts_with("deploy_phase_"));
+    }
+
+    #[test]
+    fn integration_resource_aware_planning() {
+        let planner = ResourceAwarePlanner::new(Resources::new(100.0, 100.0, 10.0));
+        let goals = vec![
+            Goal::new("heavy", "Heavy").with_resources(60.0, 60.0),
+            Goal::new("light", "Light").with_resources(20.0, 20.0),
+            Goal::new("medium", "Medium").with_resources(30.0, 30.0),
+        ];
+        let plan = planner.plan(&goals);
+        assert_eq!(plan.len(), 2); // heavy + light OR heavy + medium
+        assert_eq!(plan[0].id, "heavy"); // first in list
+    }
+
+    #[test]
+    fn integration_adaptation_cycle() {
+        let mut engine = AdaptationEngine::new();
+        let goal = Goal::new("task1", "Recurring Task").with_priority(10);
+
+        // Simulate 3 failures
+        for _ in 0..3 {
+            engine.record(Outcome {
+                goal_id: "task1".to_string(),
+                success: false,
+                duration_ms: 500,
+                resources_used: Resources::zero(),
+                notes: "timeout".to_string(),
+            });
+        }
+
+        let adj = engine.suggest_priority_adjustment(&goal);
+        assert!(adj.is_some());
+        assert_eq!(adj.unwrap().field, "priority");
+        assert_eq!(engine.success_rate("task1"), 0.0);
+    }
+
+    #[test]
+    fn integration_progress_tracking_with_decomposition() {
+        let mut tracker = ProgressTracker::new();
+        let parent = Goal::new("project", "Project").with_priority(5);
+        let subs = GoalDecomposer::decompose_equally(&parent, 4);
+
+        for sub in subs {
+            tracker.track(sub);
+        }
+        tracker.update_progress("project_sub_0", 0.5);
+        tracker.update_progress("project_sub_0", 1.0);
+        tracker.update_progress("project_sub_1", 0.25);
+        tracker.update_progress("project_sub_1", 0.5);
+        tracker.update_progress("project_sub_2", 0.0);
+        tracker.update_progress("project_sub_3", 0.25);
+
+        let on_track = tracker.on_track();
+        assert!(on_track.contains(&"project_sub_0".to_string()));
+        assert!(on_track.contains(&"project_sub_1".to_string()));
+    }
+
+    #[test]
+    fn integration_full_pipeline() {
+        // 1. Create and decompose a goal
+        let goal = Goal::new("pipeline", "Data Pipeline").with_priority(8).with_resources(50.0, 30.0);
+        let phases = GoalDecomposer::decompose_phases(&goal, &["Extract", "Transform", "Load"]);
+
+        // 2. Schedule with priority
+        let mut sched = PriorityScheduler::new();
+        sched.add_goal(Goal::new("other", "Other Task").with_priority(3));
+        for phase in phases {
+            sched.add_goal(phase);
+        }
+
+        // 3. Check feasibility
+        let planner = ResourceAwarePlanner::new(Resources::new(80.0, 60.0, 10.0));
+        let scheduled = sched.scheduled();
+        let scheduled_owned: Vec<Goal> = scheduled.iter().map(|g| (*g).clone()).collect();
+        let feasible = planner.plan(&scheduled_owned);
+        assert!(feasible.len() >= 2); // At least some goals should fit
+
+        // 4. Track progress
+        let mut tracker = ProgressTracker::new();
+        for g in scheduled {
+            tracker.track(g.clone());
+        }
+
+        tracker.update_progress("pipeline_phase_0", 1.0);
+        tracker.update_progress("pipeline_phase_1", 0.5);
+
+        // 5. Record outcomes
+        let mut engine = AdaptationEngine::new();
+        engine.record(Outcome {
+            goal_id: "pipeline_phase_0".to_string(),
+            success: true,
+            duration_ms: 200,
+            resources_used: Resources::new(10.0, 5.0, 0.0),
+            notes: String::new(),
+        });
+
+        assert!(engine.success_rate("pipeline_phase_0") > 0.0);
+        assert!(tracker.overall_progress() > 0.0);
     }
 }
