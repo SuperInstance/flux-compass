@@ -1,3 +1,4 @@
+#![allow(clippy::new_without_default, clippy::map_entry, clippy::unnecessary_map_or, clippy::useless_conversion)]
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 pub enum Direction {
